@@ -1,5 +1,36 @@
 module StringMap = Map.Make(String)
 
+let counter = ref 0
+
+let inc_counter () =
+  let value = !counter in
+  counter := value + 1;
+  value
+
+let save filename str =
+  let channel = open_out_bin filename in
+  print_endline ("Saving " ^ filename ^ ": " ^ string_of_int (String.length str));
+  output_string channel str;
+  close_out channel
+
+let with_crlf stream =
+  let open Lwt.Infix in
+  let get () =
+    Lwt_stream.get stream >>= function
+    | Some chunk -> Lwt.return (Some (chunk ^ "\r\n"))
+    | None -> Lwt.return None
+  in
+  Lwt_stream.from get
+
+let with_plain stream =
+  let open Lwt.Infix in
+  let get () =
+    Lwt_stream.get stream >>= function
+    | Some chunk -> Lwt.return (Some (chunk))
+    | None -> Lwt.return None
+  in
+  Lwt_stream.from get
+
 let string_eq ~a ~a_start ~b ~len =
   let r = ref true in
   for i = 0 to len - 1 do
@@ -48,6 +79,13 @@ let word = function
 
 let split_on_string ~pattern s =
   let pattern_length = String.length pattern in
+  let _r = match pattern with
+    | "\r\n" ->
+      print_endline "printing s substring:";
+      Hex.hexdump (Hex.of_string (String.sub s 0 (min (String.length s) 32)));
+      print_endline ("\tFound " ^ pattern ^ "<- matches: " ^ string_of_int (List.length (Str.split (Str.regexp "\r\n") s)))
+    | _ -> print_endline ""
+  in
   let rec go start acc =
     match Stringext.find_from ~start s ~pattern with
     | Some match_start ->
@@ -67,6 +105,44 @@ let split_and_process_string ~boundary s =
   in
   List.map f @@ split_on_string ~pattern:boundary s
 
+let bounded_split_on_string ~pattern until s =
+  let pattern_length = String.length pattern in
+  (inc_counter ());
+  (save ("/tmp/dww_" ^ string_of_int !counter) (s));
+  (print_endline (Printf.sprintf "bounded: %s" (Hex.hexdump_s (Hex.of_string s))));
+  (print_endline (Printf.sprintf "bounded2: %s" s));
+    let until_idx = match (Stringext.find_from ~start:0 s ~pattern:until) with
+      | None -> String.length s
+      | Some index -> index
+    in
+    let rec go start acc =
+      match (Stringext.find_from ~start s ~pattern)
+      with
+      | Some match_start ->
+        let before = String.sub s start (match_start - start) in
+        let new_acc = None::(word before)@acc in
+        let new_start = match_start + pattern_length in
+        begin
+          match (until_idx + (String.length until) = new_start) with
+          | true -> let string_after = (Stringext.string_after s new_start) in
+            print_endline ("\tstring_after (inner) length: " ^ string_of_int (String.length string_after));
+            (word string_after)@new_acc
+          | false -> go new_start new_acc
+        end
+      | None ->
+        let string_after = (Stringext.string_after s start) in
+        print_endline ("\tstring_after (outer) length: " ^ string_of_int (String.length string_after));
+        (word string_after)@acc
+    in
+    List.rev (go 0 [])
+
+let bounded_split_and_process_string ~boundary until s =
+  let f = function
+    | None -> `Delim
+    | Some w -> `Word w
+  in
+  List.map f @@ bounded_split_on_string ~pattern:boundary until s
+
 let split s boundary =
   let r = ref None in
   let push v =
@@ -85,7 +161,7 @@ let split s boundary =
       | Some x -> x ^ c0
       | None -> c0
     in
-    let string_to_process = match find_common_idx c boundary with
+    let string_to_process = match find_common_idx c "\r\n\r\n" with
     | None -> c
     | Some idx ->
       begin
@@ -105,6 +181,47 @@ let split s boundary =
   in
   Lwt_stream.append initial final
 
+let split_part s =
+  let open Lwt.Infix in
+  let boundary = "\r\n" in
+  let r = ref None in
+  let push v =
+    match !r with
+    | None -> r := Some v
+    | Some _ -> assert false
+  in
+  let pop () =
+    let res = !r in
+    r := None;
+    res
+  in
+  let go c0 =
+    let c =
+      match pop () with
+      | Some x -> x ^ c0
+      | None -> c0
+    in
+    let string_to_process = match find_common_idx c boundary with
+      | None -> c
+      | Some idx ->
+        begin
+          let prefix = String.sub c 0 idx in
+          let suffix = String.sub c idx (String.length c - idx) in
+          push suffix;
+          prefix
+        end
+    in
+    Lwt.return @@ bounded_split_and_process_string ~boundary "\r\n\r\n" string_to_process
+  in
+  let initial = Lwt_stream.map_list_s go s in
+  let final =
+    Lwt_stream.flatten @@
+    Lwt_stream.from_direct @@ fun () ->
+    option_map (split_and_process_string ~boundary) @@ pop ()
+  in
+  Lwt_stream.append initial final
+
+
 let until_next_delim s =
   Lwt_stream.from @@ fun () ->
   let%lwt res = Lwt_stream.get s in
@@ -119,8 +236,17 @@ let join s =
       | `Word _ -> None
     ) s
 
+let join_part s =
+  Lwt_stream.filter_map (function
+      | `Delim -> Some (until_next_delim @@ Lwt_stream.clone s)
+      | `Word _ -> None
+    ) s
+
 let align stream boundary =
   join @@ split stream boundary
+
+let align_part_1 stream =
+  join_part @@ split_part stream
 
 type header = string * string
 
@@ -128,7 +254,7 @@ let extract_boundary content_type =
   Stringext.chop_prefix ~prefix:"multipart/form-data; boundary=" content_type
 
 let unquote s =
-  Scanf.sscanf s "%S" @@ (fun x -> x);;
+  Scanf.sscanf s "%S" @@ (fun x -> x)
 
 let parse_name s =
   option_map unquote @@ Stringext.chop_prefix ~prefix:"form-data; name=" s
@@ -140,6 +266,7 @@ let parse_header s =
 
 let non_empty st =
   let%lwt r = Lwt_stream.to_list @@ Lwt_stream.clone st in
+  print_endline (Printf.sprintf "non_empty test: %s (%b)" (String.concat "" r) (String.concat "" r <> ""));
   Lwt.return (String.concat "" r <> "")
 
 let get_headers : string Lwt_stream.t Lwt_stream.t -> header list Lwt.t
@@ -147,7 +274,9 @@ let get_headers : string Lwt_stream.t Lwt_stream.t -> header list Lwt.t
   let%lwt header_lines = Lwt_stream.get_while_s non_empty lines in
   Lwt_list.map_s (fun header_line_stream ->
       let%lwt parts = Lwt_stream.to_list header_line_stream in
-      Lwt.return @@ parse_header @@ String.concat "" parts
+      let concatted = String.concat "" parts in
+      print_endline ("\tget_headers header: " ^ concatted);
+      Lwt.return @@ parse_header @@ concatted
     ) header_lines
 
 type stream_part =
@@ -155,13 +284,36 @@ type stream_part =
   ; body : string Lwt_stream.t
   }
 
+let process_body_part s =
+  let level = ref 0 in
+  let until_next_delim_helper s =
+    Lwt_stream.from @@ fun () ->
+    let%lwt res = Lwt_stream.get s in
+    match res with
+    | None -> 
+      print_endline "until_next_delim_helper: None";
+      Lwt.return_none
+    | Some `Delim -> print_endline "until_next_delim_helper: Delim";
+      Lwt.return_some "\r\n"
+    | Some (`Word w) -> 
+      print_endline ("until_next_delim_helper: Some: " ^ w);
+      Lwt.return_some w in
+  Lwt_stream.filter_map (fun value ->
+      print_endline ("level: " ^ string_of_int !level);
+      level := !level + 1;
+      match value with
+      | `Delim -> Some (until_next_delim_helper @@ Lwt_stream.clone s)
+      | `Word w ->  None
+    ) s
+
 let parse_part chunk_stream =
-  let lines = align chunk_stream "\r\n" in
+  let open Lwt.Infix in
+  let lines = align_part_1 (Lwt_stream.clone chunk_stream) in
   match%lwt get_headers lines with
   | [] -> Lwt.return_none
   | headers ->
     let body = Lwt_stream.concat @@ Lwt_stream.clone lines in
-    Lwt.return_some { headers ; body }
+    Lwt.return_some { headers ; body = body }
 
 let parse_stream ~stream ~content_type =
   match extract_boundary content_type with
@@ -183,6 +335,8 @@ let s_part_name {headers} =
 
 let parse_filename s =
   let parts = split_on_string s ~pattern:"; " in
+  List.iter (function | None -> print_endline  "No part..."
+                      | Some part -> print_endline ("Got filename part: " ^ part)) (parts);
   let f = function
     | None -> None
     | Some part ->
@@ -192,10 +346,26 @@ let parse_filename s =
         | _ -> None
       end
   in
-  first_matching f parts
+  List.fold_left (fun (field_name, file_name) next ->
+      match next with
+      | None -> (field_name, file_name)
+      | (Some part) ->       
+        begin
+          match Stringext.cut part ~on:"=" with
+          | Some ("filename", quoted_string) -> (field_name, Some (unquote quoted_string))
+          | Some ("name", quoted_string) -> (Some (unquote quoted_string), file_name)
+          | _ -> (field_name, file_name)
+        end
+    )
+    (None, None) parts
+    
 
 let s_part_filename {headers} =
-  parse_filename @@ List.assoc "Content-Disposition" headers
+  let filename = parse_filename @@ List.assoc "Content-Disposition" headers in
+  print_endline ("s_part_filename Filename: " ^ (match filename with
+      | (Some field_name, Some filename) -> filename
+      | _ -> "No filename"));
+  filename
 
 type file = stream_part
 
@@ -207,9 +377,9 @@ let file_content_type {headers} =
 
 let as_part part =
   match s_part_filename part with
-  | Some filename ->
+  | (_, Some filename) ->
       Lwt.return (`File part)
-  | None ->
+  | (_, None) ->
     let%lwt chunks = Lwt_stream.to_list part.body in
     let body = String.concat "" chunks in
     Lwt.return (`String body)
@@ -393,10 +563,15 @@ let read_part reader boundary callbacks fields =
     | Some x -> x
     | None -> invalid_arg "handle_multipart"
   in
-  match parse_filename content_disposition with
-  | Some filename ->
+  let filename = parse_filename content_disposition in
+  print_endline ("read_part Filename: " ^ (match filename with
+      | (Some field_name, Some filename) -> field_name ^ "_" ^ filename
+      | _ -> "No filename"
+      ));
+  match filename with
+  | (_, Some filename) ->
       read_file_part reader boundary @@ get_callback name filename callbacks
-  | None ->
+  | (_, None) ->
     let%lwt value = read_string_part reader boundary in
     fields := (name, value)::!fields;
     Lwt.return_unit
