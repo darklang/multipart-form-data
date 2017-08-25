@@ -9,13 +9,14 @@ val s_part_name : stream_part -> string
 
 val s_part_body : stream_part -> string Lwt_stream.t
 
-val s_part_filename : stream_part -> (string option * string option)
+val s_part_filename : stream_part -> (string * string option)
 
 val parse_stream : stream:string Lwt_stream.t -> content_type:string -> stream_part Lwt_stream.t Lwt.t
 
 type file
 
 val file_name : file -> string
+val full_name : file -> (string * string option)
 val file_content_type : file -> string
 val file_stream : file -> string Lwt_stream.t
 

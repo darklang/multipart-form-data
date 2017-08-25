@@ -289,11 +289,11 @@ let parse_filename s =
         begin
           match Stringext.cut part ~on:"=" with
           | Some ("filename", quoted_string) -> (field_name, Some (unquote quoted_string))
-          | Some ("name", quoted_string) -> (Some (unquote quoted_string), file_name)
+          | Some ("name", quoted_string) -> ((unquote quoted_string), file_name)
           | _ -> (field_name, file_name)
         end
     )
-    (None, None) parts
+    ("", None) parts
     
 
 let s_part_filename {headers} =
@@ -304,6 +304,7 @@ type file = stream_part
 
 let file_stream = s_part_body
 let file_name = s_part_name
+let full_name = s_part_filename
 
 let file_content_type {headers} =
   List.assoc "Content-Type" headers
