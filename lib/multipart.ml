@@ -1,36 +1,5 @@
 module StringMap = Map.Make(String)
 
-let counter = ref 0
-
-let inc_counter () =
-  let value = !counter in
-  counter := value + 1;
-  value
-
-let save filename str =
-  let channel = open_out_bin filename in
-  print_endline ("Saving " ^ filename ^ ": " ^ string_of_int (String.length str));
-  output_string channel str;
-  close_out channel
-
-let with_crlf stream =
-  let open Lwt.Infix in
-  let get () =
-    Lwt_stream.get stream >>= function
-    | Some chunk -> Lwt.return (Some (chunk ^ "\r\n"))
-    | None -> Lwt.return None
-  in
-  Lwt_stream.from get
-
-let with_plain stream =
-  let open Lwt.Infix in
-  let get () =
-    Lwt_stream.get stream >>= function
-    | Some chunk -> Lwt.return (Some (chunk))
-    | None -> Lwt.return None
-  in
-  Lwt_stream.from get
-
 let string_eq ~a ~a_start ~b ~len =
   let r = ref true in
   for i = 0 to len - 1 do
@@ -79,13 +48,6 @@ let word = function
 
 let split_on_string ~pattern s =
   let pattern_length = String.length pattern in
-  let _r = match pattern with
-    | "\r\n" ->
-      print_endline "printing s substring:";
-      Hex.hexdump (Hex.of_string (String.sub s 0 (min (String.length s) 32)));
-      print_endline ("\tFound " ^ pattern ^ "<- matches: " ^ string_of_int (List.length (Str.split (Str.regexp "\r\n") s)))
-    | _ -> print_endline ""
-  in
   let rec go start acc =
     match Stringext.find_from ~start s ~pattern with
     | Some match_start ->
@@ -107,10 +69,6 @@ let split_and_process_string ~boundary s =
 
 let bounded_split_on_string ~pattern until s =
   let pattern_length = String.length pattern in
-  (inc_counter ());
-  (save ("/tmp/dww_" ^ string_of_int !counter) (s));
-  (print_endline (Printf.sprintf "bounded: %s" (Hex.hexdump_s (Hex.of_string s))));
-  (print_endline (Printf.sprintf "bounded2: %s" s));
     let until_idx = match (Stringext.find_from ~start:0 s ~pattern:until) with
       | None -> String.length s
       | Some index -> index
@@ -125,13 +83,11 @@ let bounded_split_on_string ~pattern until s =
         begin
           match (until_idx + (String.length until) = new_start) with
           | true -> let string_after = (Stringext.string_after s new_start) in
-            print_endline ("\tstring_after (inner) length: " ^ string_of_int (String.length string_after));
             (word string_after)@new_acc
           | false -> go new_start new_acc
         end
       | None ->
         let string_after = (Stringext.string_after s start) in
-        print_endline ("\tstring_after (outer) length: " ^ string_of_int (String.length string_after));
         (word string_after)@acc
     in
     List.rev (go 0 [])
@@ -266,7 +222,6 @@ let parse_header s =
 
 let non_empty st =
   let%lwt r = Lwt_stream.to_list @@ Lwt_stream.clone st in
-  print_endline (Printf.sprintf "non_empty test: %s (%b)" (String.concat "" r) (String.concat "" r <> ""));
   Lwt.return (String.concat "" r <> "")
 
 let get_headers : string Lwt_stream.t Lwt_stream.t -> header list Lwt.t
@@ -275,7 +230,6 @@ let get_headers : string Lwt_stream.t Lwt_stream.t -> header list Lwt.t
   Lwt_list.map_s (fun header_line_stream ->
       let%lwt parts = Lwt_stream.to_list header_line_stream in
       let concatted = String.concat "" parts in
-      print_endline ("\tget_headers header: " ^ concatted);
       Lwt.return @@ parse_header @@ concatted
     ) header_lines
 
@@ -285,22 +239,15 @@ type stream_part =
   }
 
 let process_body_part s =
-  let level = ref 0 in
   let until_next_delim_helper s =
     Lwt_stream.from @@ fun () ->
     let%lwt res = Lwt_stream.get s in
     match res with
     | None -> 
-      print_endline "until_next_delim_helper: None";
       Lwt.return_none
-    | Some `Delim -> print_endline "until_next_delim_helper: Delim";
-      Lwt.return_some "\r\n"
-    | Some (`Word w) -> 
-      print_endline ("until_next_delim_helper: Some: " ^ w);
-      Lwt.return_some w in
+    | Some `Delim -> Lwt.return_some "\r\n"
+    | Some (`Word w) -> Lwt.return_some w in
   Lwt_stream.filter_map (fun value ->
-      print_endline ("level: " ^ string_of_int !level);
-      level := !level + 1;
       match value with
       | `Delim -> Some (until_next_delim_helper @@ Lwt_stream.clone s)
       | `Word w ->  None
@@ -335,17 +282,6 @@ let s_part_name {headers} =
 
 let parse_filename s =
   let parts = split_on_string s ~pattern:"; " in
-  List.iter (function | None -> print_endline  "No part..."
-                      | Some part -> print_endline ("Got filename part: " ^ part)) (parts);
-  let f = function
-    | None -> None
-    | Some part ->
-      begin
-        match Stringext.cut part ~on:"=" with
-        | Some ("filename", quoted_string) -> Some (unquote quoted_string)
-        | _ -> None
-      end
-  in
   List.fold_left (fun (field_name, file_name) next ->
       match next with
       | None -> (field_name, file_name)
@@ -362,9 +298,6 @@ let parse_filename s =
 
 let s_part_filename {headers} =
   let filename = parse_filename @@ List.assoc "Content-Disposition" headers in
-  print_endline ("s_part_filename Filename: " ^ (match filename with
-      | (Some field_name, Some filename) -> filename
-      | _ -> "No filename"));
   filename
 
 type file = stream_part
@@ -564,10 +497,6 @@ let read_part reader boundary callbacks fields =
     | None -> invalid_arg "handle_multipart"
   in
   let filename = parse_filename content_disposition in
-  print_endline ("read_part Filename: " ^ (match filename with
-      | (Some field_name, Some filename) -> field_name ^ "_" ^ filename
-      | _ -> "No filename"
-      ));
   match filename with
   | (_, Some filename) ->
       read_file_part reader boundary @@ get_callback name filename callbacks
