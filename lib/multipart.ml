@@ -243,7 +243,7 @@ let process_body_part s =
     Lwt_stream.from @@ fun () ->
     let%lwt res = Lwt_stream.get s in
     match res with
-    | None -> 
+    | None ->
       Lwt.return_none
     | Some `Delim -> Lwt.return_some "\r\n"
     | Some (`Word w) -> Lwt.return_some w in
@@ -285,7 +285,7 @@ let parse_filename s =
   List.fold_left (fun (field_name, file_name) next ->
       match next with
       | None -> (field_name, file_name)
-      | (Some part) ->       
+      | (Some part) ->
         begin
           match Stringext.cut part ~on:"=" with
           | Some ("filename", quoted_string) -> (field_name, Some (unquote quoted_string))
@@ -294,7 +294,7 @@ let parse_filename s =
         end
     )
     ("", None) parts
-    
+
 
 let s_part_filename {headers} =
   let filename = parse_filename @@ List.assoc "Content-Disposition" headers in
@@ -409,6 +409,7 @@ let read_headers reader =
   go []
 
 let rec compute_case reader boundary =
+  let open Lwt.Infix in
   match%lwt Reader.read_chunk reader with
   | None -> Lwt.return `Empty
   | Some line ->
@@ -425,7 +426,7 @@ let rec compute_case reader boundary =
               | Some 0 ->
                 begin
                 Reader.unread reader line;
-                Reader.read_next reader >>
+                Reader.read_next reader >>= fun _ ->
                 compute_case reader boundary
                 end
               | Some amb_idx ->
@@ -470,9 +471,10 @@ let strip_crlf s =
     s
 
 let read_string_part reader boundary =
+  let open Lwt.Infix in
   let value = Buffer.create 0 in
   let append_to_value line = Lwt.return (Buffer.add_string value line) in
-  iter_part reader boundary append_to_value >>
+  iter_part reader boundary append_to_value >>= fun _ ->
   Lwt.return @@ strip_crlf (Buffer.contents value)
 
 type callbacks =
