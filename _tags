@@ -1,6 +1,6 @@
 true: debug
 true: package(stringext)
 true: package(lwt)
-true: package(lwt.ppx)
+true: package(lwt_ppx)
 <lib>: include
 <test/*>: package(alcotest), package(lwt.unix), package(ppx_deriving.std)
